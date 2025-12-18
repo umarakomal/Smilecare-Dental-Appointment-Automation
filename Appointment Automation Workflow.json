@@ -1,0 +1,1294 @@
+{
+  "name": "Appointment Automation Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "api/available-slots",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "4d40f24a-b7de-43f2-bf6c-4074c8384f8a",
+      "name": "API - Get Available Slots",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -64,
+        -144
+      ],
+      "webhookId": "aa589039-4d66-4ce8-8d6c-13fecd11f1f1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const query = $input.item.json.query || {};\n\n// 1. Determine the Base Date (YYYY-MM-DD format)\n// If query.date is not provided, use the current UTC date.\nconst todayUTC = new Date().toISOString().split('T')[0];\nconst date = query.date || todayUTC;\n\n// 2. Determine the Duration (in minutes, default to 60)\n// Use Math.round to ensure the duration is a clean integer.\nconst DEFAULT_DURATION_MINUTES = 60;\nconst duration = Math.round(parseFloat(query.duration) || DEFAULT_DURATION_MINUTES);\n\n// 3. Calculate start and end of the specified day in UTC\n\n// To ensure consistency, we use the 'YYYY-MM-DDT00:00:00.000Z' format\n// The T00:00:00Z ensures the date object is initialized at the absolute start of the day in UTC.\nconst startOfDay = new Date(`${date}T00:00:00.000Z`).toISOString();\n\n// To find the end of the day, it's safer to go to the start of the next day\n// and subtract 1 millisecond. However, using 23:59:59.999Z is generally accepted\n// for simple end-of-day bounding in most systems.\n// NOTE: For absolute precision, T23:59:59.999Z is safer than T23:59:59Z.\nconst endOfDay = new Date(`${date}T23:59:59.999Z`).toISOString();\n\nreturn { \n  json: { \n    date, \n    duration, \n    startOfDay, \n    endOfDay \n  } \n};"
+      },
+      "id": "216fae30-db41-42d2-8e1a-022ccc9407ba",
+      "name": "Parse Availability Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get all items from previous node (Google Sheets returns multiple items)\nconst allItems = $input.all();\n\n// Extract appointments from Google Sheets - each row is a separate item\nconst appointments = allItems.map(item => item.json);\n\n// Get request parameters from the first item (passed through from Parse Availability Request)\nconst firstItem = $('Parse Availability Request').first().json;\nconst requestedDate = firstItem.date || new Date().toISOString().split('T')[0];\nconst duration = parseInt(firstItem.duration || 60); // Duration in minutes\nconst timezone = firstItem.timezone || 'Europe/Berlin';\n\n// Office hours configuration (German time)\nconst officeHours = [\n  { start: 9, end: 12 },   // Morning block: 09:00-12:00\n  { start: 13, end: 17 }   // Afternoon block: 13:00-17:00\n];\n\n// Helper function to create date object\nfunction createDateTime(dateStr, hour, minute = 0) {\n  const date = new Date(dateStr + 'T00:00:00Z');\n  date.setUTCHours(hour, minute, 0, 0);\n  return date;\n}\n\n// Helper function to parse appointment time and create datetime object\nfunction parseAppointmentDateTime(appointment) {\n  if (!appointment['Appointment Date'] || !appointment['Appointment Time']) {\n    return null;\n  }\n  \n  const dateStr = appointment['Appointment Date'];\n  const timeStr = appointment['Appointment Time'];\n  \n  // Parse time - handle both 24-hour (HH:MM) and 12-hour (HH:MM AM/PM) formats\n  let dateTimeString;\n  if (timeStr.includes('AM') || timeStr.includes('PM')) {\n    // 12-hour format\n    dateTimeString = `${dateStr} ${timeStr}`;\n  } else {\n    // 24-hour format (e.g., \"14:00\")\n    dateTimeString = `${dateStr}T${timeStr}:00`;\n  }\n  \n  const dateTime = new Date(dateTimeString);\n  \n  // Return null if invalid date\n  if (isNaN(dateTime.getTime())) {\n    return null;\n  }\n  \n  return dateTime;\n}\n\n// Helper function to check if a time slot conflicts with existing appointments\nfunction hasConflict(slotStart, slotEnd, appointments) {\n  for (const appointment of appointments) {\n    const appointmentStart = parseAppointmentDateTime(appointment);\n    \n    if (!appointmentStart) continue;\n    \n    // Calculate appointment end time (assume 1 hour duration if not specified)\n    const appointmentDuration = parseFloat(appointment['Hour_Number'] || appointment.duration || 1);\n    const appointmentEnd = new Date(appointmentStart.getTime() + (appointmentDuration * 60 * 60 * 1000));\n    \n    // Check for overlap\n    if (slotStart < appointmentEnd && slotEnd > appointmentStart) {\n      return true;\n    }\n  }\n  return false;\n}\n\n// Generate available time slots\nconst availableSlots = [];\nconst now = new Date();\n\n// Iterate through office hour blocks\nfor (const block of officeHours) {\n  let currentHour = block.start;\n  \n  while (currentHour < block.end) {\n    const slotStart = createDateTime(requestedDate, currentHour, 0);\n    const slotEnd = new Date(slotStart.getTime() + (duration * 60 * 1000));\n    \n    // Check if slot end time exceeds block end time\n    const blockEndTime = createDateTime(requestedDate, block.end, 0);\n    if (slotEnd > blockEndTime) {\n      break; // Move to next block\n    }\n    \n    // Check if slot is at least 24 hours in the future\n    const twentyFourHoursFromNow = new Date(now.getTime() + (24 * 60 * 60 * 1000));\n    if (slotStart < twentyFourHoursFromNow) {\n      currentHour++;\n      continue;\n    }\n    \n    // Check for conflicts with existing appointments from Google Sheets\n    if (!hasConflict(slotStart, slotEnd, appointments)) {\n      // Format time strings\n      const startHour = String(currentHour).padStart(2, '0');\n      const endHour = String(Math.floor(slotEnd.getUTCHours())).padStart(2, '0');\n      const endMinute = String(slotEnd.getUTCMinutes()).padStart(2, '0');\n      \n      availableSlots.push({\n        start: `${startHour}:00`,\n        end: `${endHour}:${endMinute}`,\n        startISO: slotStart.toISOString(),\n        endISO: slotEnd.toISOString()\n      });\n    }\n    \n    // Move to next hour\n    currentHour++;\n  }\n}\n\n// Return available slots\nreturn [{\n  json: {\n    date: requestedDate,\n    timezone: timezone,\n    duration: duration,\n    slots: availableSlots,\n    totalAvailable: availableSlots.length\n  }\n}];"
+      },
+      "id": "6a875834-023e-406e-9b76-d89c12f63565",
+      "name": "Calculate Available Slots",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        816,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "c12dd9f5-9eda-4f64-952f-a8647e802d6b",
+      "name": "Return Available Slots",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1168,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "api/book-appointment",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "1284b082-f0dd-458e-8555-e0ed49bf0aad",
+      "name": "API - Book Appointment",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -320,
+        288
+      ],
+      "webhookId": "733f6319-8cd6-431d-9253-3b8f972a407c"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Step 1: Get the raw string content from the body property.\nconst rawBodyString = items[0].json.body || items[0].json;\n\nlet requestBody;\n\ntry {\n    // CRITICAL FIX: Replace single quotes with double quotes and parse the JSON string.\n    const cleanJsonString = rawBodyString.replace(/'/g, '\"');\n    requestBody = JSON.parse(cleanJsonString);\n} catch (e) {\n    // Fallback if parsing fails (e.g., if the body was already an object).\n    requestBody = rawBodyString; \n}\n\n\n// Define required fields (using the correct space-separated keys)\nconst requiredFields = [\n  { field: 'Customer Name', label: 'Customer Name' },\n  { field: 'Email Address', label: 'Email Address' },\n  { field: 'Phone Number', label: 'Phone Number' },\n  { field: 'Service Type', label: 'Service Type' },\n  { field: 'Booking Date', label: 'Booking Date' },\n  { field: 'Booking Time', label: 'Booking Time' },\n  { field: 'Duration', label: 'Duration' },\n  { field: 'Staff Member', label: 'Staff Member' },\n  { field: 'Price', label: 'Price' }\n];\n\n// Check for missing fields\nconst missingFields = [];\nfor (const { field, label } of requiredFields) {\n  if (!requestBody || !requestBody[field] || requestBody[field] === '') { \n    missingFields.push(label);\n  }\n}\n\nif (missingFields.length > 0) {\n  throw new Error(`Missing required fields: ${missingFields.join(', ')}`);\n}\n\n// Map and Validate Data (using standard keys for output)\nconst validatedData = {};\nvalidatedData.name = requestBody['Customer Name'].trim();\nvalidatedData.email = requestBody['Email Address'].trim().toLowerCase();\nvalidatedData.phone = requestBody['Phone Number'].trim();\nvalidatedData.service = requestBody['Service Type'].trim();\nvalidatedData.date = requestBody['Booking Date'].trim();\nvalidatedData.time = requestBody['Booking Time'].trim();\nvalidatedData.staff = requestBody['Staff Member'].trim();\n\n// 1. Validate duration is a positive number\nvalidatedData.duration = parseFloat(requestBody['Duration']);\nif (isNaN(validatedData.duration) || validatedData.duration <= 0) {\n  throw new Error('Duration must be a positive number');\n}\n\n// 2. Validate price is a non-negative number\nvalidatedData.price = parseFloat(requestBody['Price']);\nif (isNaN(validatedData.price) || validatedData.price < 0) {\n  throw new Error('Price must be a non-negative number');\n}\n\n// 3. Validate email format\nconst emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\nif (!emailRegex.test(validatedData.email)) {\n  throw new Error('Invalid email address format');\n}\n\n// Return validated data with standardized keys\nreturn [{\n  json: {\n    ...validatedData,\n    validated: true\n  }\n}];"
+      },
+      "id": "565dfa35-a9d8-4696-a5b5-97a0f56258f6",
+      "name": "Validate Booking Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const bookingId = 'BK-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8).toUpperCase();\nreturn { json: { ...items[0].json, booking_id: bookingId, status: 'Confirmed', source: 'API Booking'  } };"
+      },
+      "id": "2a490cb9-dfe2-43d9-8264-3f540b256bb2",
+      "name": "Generate API Booking ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        176,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "id-1",
+              "name": "Booking_id",
+              "value": "={{ $json.booking_id }}",
+              "type": "string"
+            },
+            {
+              "id": "id-2",
+              "name": "Customer_Name",
+              "value": "={{ $json.name }}",
+              "type": "string"
+            },
+            {
+              "id": "id-3",
+              "name": "Email",
+              "value": "={{ $json.email }}",
+              "type": "string"
+            },
+            {
+              "id": "id-4",
+              "name": "Booking_date",
+              "value": "={{ $json.date }}",
+              "type": "string"
+            },
+            {
+              "id": "id-5",
+              "name": "Start_time",
+              "value": "={{ $json.time }}",
+              "type": "string"
+            },
+            {
+              "id": "id-6",
+              "name": "Hour_Number",
+              "value": "={{ $json.duration }}",
+              "type": "string"
+            },
+            {
+              "id": "id-7",
+              "name": "Service_name",
+              "value": "={{ $json.service }}",
+              "type": "string"
+            },
+            {
+              "id": "id-8",
+              "name": "Staff_member",
+              "value": "={{ $json.staff }}",
+              "type": "string"
+            },
+            {
+              "id": "id-9",
+              "name": "Price",
+              "value": "={{ $json.price }}",
+              "type": "string"
+            },
+            {
+              "id": "id-10",
+              "name": "Status",
+              "value": "={{ $json.status }}",
+              "type": "string"
+            },
+            {
+              "id": "id-11",
+              "name": "Source",
+              "value": "={{ $json.source }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "fa998517-3997-40af-9ed0-8b495f1c4640",
+      "name": "Prepare API Booking Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        416,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the first item's data\nconst item = $input.first().json;\n\n// Extract booking date and start time\nconst bookingDate = item.Booking_date || item.booking_date;\nconst startTime = item.Start_time || item.start_time;\nconst duration = parseFloat(item.Hour_Number || item.duration || 1);\n\n// Set Indian Timezone Offset (+5.5 hours)\nconst timezoneOffset = '+05:30';\n\n// Parse time - handle both 24-hour (HH:MM) and 12-hour (HH:MM AM/PM) formats\nlet dateTimeString;\nif (startTime.includes('AM') || startTime.includes('PM')) {\n  // 12-hour format\n  dateTimeString = `${bookingDate} ${startTime}`;\n} else {\n  // 24-hour format (e.g., \"14:00\")\n  dateTimeString = `${bookingDate}T${startTime}:00${timezoneOffset}`;\n}\n\nconst startDateTime = new Date(dateTimeString);\n\n// Validate the date\nif (isNaN(startDateTime.getTime())) {\n  throw new Error(`Invalid date/time format: ${bookingDate} ${startTime}`);\n}\n\n// Calculate end time by adding duration in hours\nconst endDateTime = new Date(startDateTime.getTime() + (duration * 60 * 60 * 1000));\n\n// Return all booking data with new datetime fields\nreturn [{\n  json: {\n    ...item,\n    startDateTime: startDateTime.toISOString(),\n    endDateTime: endDateTime.toISOString()\n  }\n}];"
+      },
+      "id": "015e7bf0-4ff8-4afc-9279-3db544be034d",
+      "name": "Combine API Date and Time",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        656,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get all items from the Google Sheets node (Read Appointments for Booking)\nconst allItems = $input.all();\n\n// Get the booking data from the first item (contains our booking details)\nconst bookingData = $('Combine API Date and Time').first().json;\n\n// Extract appointments from Google Sheets - each row is a separate item\nconst appointments = allItems.map(item => item.json);\n\n// Extract the requested time slot from booking data\nconst requestedStart = new Date(bookingData.startDateTime);\nconst requestedEnd = new Date(bookingData.endDateTime);\n\n// Helper function to parse appointment datetime from sheets\nfunction parseAppointmentDateTime(appointmentDate, appointmentTime) {\n  if (!appointmentDate || !appointmentTime) return null;\n  \n  // Handle both 24-hour (HH:MM) and 12-hour (HH:MM AM/PM) formats\n  let dateTimeString;\n  if (appointmentTime.includes('AM') || appointmentTime.includes('PM')) {\n    // 12-hour format\n    dateTimeString = `${appointmentDate} ${appointmentTime}`;\n  } else {\n    // 24-hour format (e.g., \"14:00\")\n    dateTimeString = `${appointmentDate}T${appointmentTime}:00`;\n  }\n  \n  const dateTime = new Date(dateTimeString);\n  return isNaN(dateTime.getTime()) ? null : dateTime;\n}\n\n// Check for conflicts\nlet isAvailable = true;\nlet conflictingEvent = null;\n\n// Check each appointment from the sheets\nfor (const appointment of appointments) {\n  // Skip if appointment doesn't have proper date/time fields\n  const appointmentDate = appointment['Appointment Date'];\n  const appointmentTime = appointment['Appointment Time'];\n  \n  if (!appointmentDate || !appointmentTime) continue;\n  \n  // Parse the appointment start time\n  const appointmentStart = parseAppointmentDateTime(appointmentDate, appointmentTime);\n  if (!appointmentStart) continue;\n  \n  // Calculate appointment end time (assume 1 hour duration if not specified)\n  const duration = parseFloat(appointment['Hour_Number'] || appointment['Duration'] || 1);\n  const appointmentEnd = new Date(appointmentStart.getTime() + (duration * 60 * 60 * 1000));\n  \n  // Check if there's an overlap\n  if (requestedStart < appointmentEnd && requestedEnd > appointmentStart) {\n    isAvailable = false;\n    conflictingEvent = {\n      name: appointment['Name'] || 'Unknown',\n      bookingId: appointment['Booking ID'],\n      date: appointmentDate,\n      time: appointmentTime,\n      duration: duration\n    };\n    break;\n  }\n}\n\n// Return the result with all booking data\nreturn [{\n  json: {\n    ...bookingData,\n    isAvailable: isAvailable,\n    conflictingEvent: conflictingEvent,\n    checkPerformed: true,\n    appointmentsChecked: appointments.length\n  }\n}];"
+      },
+      "id": "46ca2e8b-c8ef-4cea-b509-fc738a0380d8",
+      "name": "Check API Conflicts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "id-1",
+              "leftValue": "={{ $json.isAvailable }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9b60ce5d-3f7f-4a8e-afda-1265713e3e27",
+      "name": "Is API Slot Available?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1360,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1aIETeluTYQrtjGkTjxt0uuIU_M86FkAGymE9WqXfQVs",
+          "mode": "list",
+          "cachedResultName": "Smilecare Dental Appointments Booking System",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1aIETeluTYQrtjGkTjxt0uuIU_M86FkAGymE9WqXfQVs/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Appointments"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Name": "={{ $('Is API Slot Available?').item.json.name }}",
+            "Email": "={{ $('Is API Slot Available?').item.json.email }}",
+            "Appointment Date": "={{ $('Is API Slot Available?').item.json.date }}",
+            "Booking ID": "={{ $('Is API Slot Available?').item.json.Booking_id }}",
+            "Appointment Time": "={{ $('Is API Slot Available?').item.json.time }}",
+            "Phone": "={{ $('Is API Slot Available?').item.json.phone }}",
+            "Booking Status": "Confirmed",
+            "Reminder Sent": "Pending",
+            "Price (USD)": "={{ $('Is API Slot Available?').item.json.price }}",
+            "Age": "30"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Booking ID",
+              "displayName": "Booking ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Appointment Date",
+              "displayName": "Appointment Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Appointment Time",
+              "displayName": "Appointment Time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Name",
+              "displayName": "Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Age",
+              "displayName": "Age",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Phone",
+              "displayName": "Phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Booking Status",
+              "displayName": "Booking Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Reminder Sent",
+              "displayName": "Reminder Sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Price (USD)",
+              "displayName": "Price (USD)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "a633d88e-7dab-463b-ba4c-156a4837e23f",
+      "name": "Store API Booking to Appointments",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1872,
+        16
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "8GZi8I7qSqSpnDpk",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1aIETeluTYQrtjGkTjxt0uuIU_M86FkAGymE9WqXfQVs",
+          "mode": "list",
+          "cachedResultName": "Smilecare Dental Appointments Booking System",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1aIETeluTYQrtjGkTjxt0uuIU_M86FkAGymE9WqXfQVs/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Analytics"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Email": "={{ $json.Email }}",
+            "Appointment Date": "={{ $json['Appointment Date'] }}",
+            "Name": "={{ $json.Name }}",
+            "Booking Status": "Confirmed",
+            "Appointment Time": "={{ $json['Appointment Time'] }}",
+            "Price (USD)": "={{ $json['Price (USD)'] }}",
+            "Booking ID": "={{ $json['Booking ID'] }}",
+            "Reminder Sent": ""
+          },
+          "matchingColumns": [
+            "Name"
+          ],
+          "schema": [
+            {
+              "id": "Booking ID",
+              "displayName": "Booking ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Appointment Date",
+              "displayName": "Appointment Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Appointment Time",
+              "displayName": "Appointment Time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Name",
+              "displayName": "Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Age",
+              "displayName": "Age",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Phone",
+              "displayName": "Phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Booking Status",
+              "displayName": "Booking Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Reminder Sent",
+              "displayName": "Reminder Sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Price (USD)",
+              "displayName": "Price (USD)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Id",
+              "displayName": "Id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "summary",
+              "displayName": "summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "start",
+              "displayName": "start",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "end",
+              "displayName": "end",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "creator",
+              "displayName": "creator",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "organizer",
+              "displayName": "organizer",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "description",
+              "displayName": "description",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "created",
+              "displayName": "created",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "updated",
+              "displayName": "updated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "etag",
+              "displayName": "etag",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "eventType",
+              "displayName": "eventType",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "aa780c1c-60c6-4b06-865c-3fd18a170549",
+      "name": "Store API Booking to Analytics",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2144,
+        16
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "8GZi8I7qSqSpnDpk",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"success\",\n  \"booking_id\": \"{{ $json.Booking_id }}\",\n  \"message\": \"Appointment booked successfully\",\n  \"date\": \"{{ $json.Booking_date }}\",\n  \"time\": \"{{ $json.Start_time }}\"\n}",
+        "options": {}
+      },
+      "id": "21933aa2-3698-460e-9802-3a4885c9ccfc",
+      "name": "Return Booking Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2624,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'error', message: 'Time slot no longer available', requested_time: $json.Booking_date + ' ' + $json.Start_time } }}",
+        "options": {}
+      },
+      "id": "fce6b99b-1e2a-46b7-92ee-38c57dc34c54",
+      "name": "Return Slot Unavailable",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1792,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1-0xdXlVNiQ6kkfuIMNaYgZiRIWjKzS6AFVP-suzhV3U"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Appointments"
+        },
+        "filtersUI": {
+          "values": []
+        },
+        "options": {}
+      },
+      "id": "c83be6cc-a7c7-4616-a4d6-f80de62718eb",
+      "name": "Read Appointments for Availability",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        528,
+        -144
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "8GZi8I7qSqSpnDpk",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1-0xdXlVNiQ6kkfuIMNaYgZiRIWjKzS6AFVP-suzhV3U"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Appointments"
+        },
+        "filtersUI": {
+          "values": []
+        },
+        "options": {}
+      },
+      "id": "b10d9aea-98d0-4e4b-aaf8-ee2a7c77be35",
+      "name": "Read Appointments for Booking",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        896,
+        288
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "8GZi8I7qSqSpnDpk",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "value": "umarakomal89@gmail.com",
+          "mode": "id"
+        },
+        "start": "={{ $json.startDateTime }}",
+        "end": "={{ $json.endDateTime }}",
+        "additionalFields": {
+          "description": "={{ 'Booking ID: ' + $json.Booking_id + ', Service: ' + $json.Service_name + ', Staff: ' + $json.Staff_member + ', Price: $' + $json.Price }}",
+          "summary": "={{ 'Appointment with ' + $json.Customer_Name + ' - ' + $json.Service_name }}"
+        }
+      },
+      "id": "b5a23b3c-5f95-4578-9d82-76a0ea30d370",
+      "name": "Create API Calendar Event",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        1632,
+        16
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "1I4FGEF8zlNqMc97",
+          "name": "Google Calendar account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "Public API endpoint to fetch available appointment slots.\nAccepts optional date and duration parameters.",
+        "height": 352,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -144,
+        -304
+      ],
+      "typeVersion": 1,
+      "id": "07e00e98-9eb9-426b-b963-07ca282f4be4",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "Normalizes request parameters.\n\nSets default date (UTC today)\n\nSets default duration (60 min)\n\nCalculates start & end of the day",
+        "height": 352,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        160,
+        -304
+      ],
+      "typeVersion": 1,
+      "id": "9848a2e7-70fe-46f9-972c-d014c2d08a21",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "Reads existing bookings from Google Sheets\nUsed to avoid double booking while calculating availability",
+        "height": 352,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        448,
+        -304
+      ],
+      "typeVersion": 1,
+      "id": "32972117-d8b4-4b19-91c5-930b121f6024",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "Returns available slots as JSON response to frontend / API clienthour advance booking rule",
+        "height": 352,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1088,
+        -304
+      ],
+      "typeVersion": 1,
+      "id": "95c88b1a-6a7c-48c8-8e12-7914fc998c90",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "content": "Public booking endpoint\nReceives patient details, service, date, time, staff & price",
+        "height": 352,
+        "width": 224,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -368,
+        192
+      ],
+      "typeVersion": 1,
+      "id": "c1cbe876-3147-4778-9239-a85921b6577b",
+      "name": "Sticky Note5"
+    },
+    {
+      "parameters": {
+        "content": "Ensures all required fields are present\nValidates email format, duration & price values",
+        "height": 352,
+        "width": 224,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -128,
+        192
+      ],
+      "typeVersion": 1,
+      "id": "4f30e602-d38f-457c-954b-942da848f554",
+      "name": "Sticky Note6"
+    },
+    {
+      "parameters": {
+        "content": "Creates a unique booking ID\nFormat: BK-TIMESTAMP-RANDOM",
+        "height": 352,
+        "width": 224,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        112,
+        192
+      ],
+      "typeVersion": 1,
+      "id": "968d4351-a5f0-4dc3-868e-cb7a221f23e5",
+      "name": "Sticky Note7"
+    },
+    {
+      "parameters": {
+        "content": "Maps API fields to internal booking schema\nStandardizes column names for Sheets & Calendar",
+        "height": 352,
+        "width": 224,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        352,
+        192
+      ],
+      "typeVersion": 1,
+      "id": "bd62a8ed-7693-4665-b364-3e7d794451bf",
+      "name": "Sticky Note8"
+    },
+    {
+      "parameters": {
+        "content": "Merges date + time into ISO timestamps\nCalculates appointment end time based on duration",
+        "height": 352,
+        "width": 224,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        592,
+        192
+      ],
+      "typeVersion": 1,
+      "id": "44da250c-6f38-48c6-b9b5-9edeb4920b94",
+      "name": "Sticky Note9"
+    },
+    {
+      "parameters": {
+        "content": "Loads existing appointments\nUsed for final conflict check before confirmation",
+        "height": 352,
+        "width": 224,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        832,
+        192
+      ],
+      "typeVersion": 1,
+      "id": "df4241d0-8837-496f-b89e-6a6b6bd1f2f0",
+      "name": "Sticky Note10"
+    },
+    {
+      "parameters": {
+        "content": "Detects overlapping appointments\nBlocks booking if time slot is already taken",
+        "height": 352,
+        "width": 224,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1072,
+        192
+      ],
+      "typeVersion": 1,
+      "id": "31417460-fc92-4f0d-b1a9-2060e05ba355",
+      "name": "Sticky Note11"
+    },
+    {
+      "parameters": {
+        "content": "Decision node:\\n> ✅ Yes → create calendar event\\n> ❌ No → return slot unavailable response",
+        "height": 352,
+        "width": 224,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1312,
+        192
+      ],
+      "typeVersion": 1,
+      "id": "ed92395a-e9a0-4815-a05a-df28693211ba",
+      "name": "Sticky Note12"
+    },
+    {
+      "parameters": {
+        "content": "Creates Google Calendar event for doctor\nActs as doctor notification system\nIncludes booking ID, service & patient info",
+        "height": 336,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1552,
+        -112
+      ],
+      "typeVersion": 1,
+      "id": "59909a3c-f186-4cf6-b8c8-e7b370c204c5",
+      "name": "Sticky Note13"
+    },
+    {
+      "parameters": {
+        "content": "Saves confirmed booking to Google Sheets (Appointments tab)\nPrimary data source for availability checks",
+        "height": 336,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1808,
+        -112
+      ],
+      "typeVersion": 1,
+      "id": "c8859c0e-0d5b-4d5d-b1c1-fb9e9e8022ff",
+      "name": "Sticky Note14"
+    },
+    {
+      "parameters": {
+        "content": "Stores booking data for reporting & insights\nUsed for tracking clinic performance",
+        "height": 336,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        2064,
+        -112
+      ],
+      "typeVersion": 1,
+      "id": "f7b91230-a2de-49b3-b072-6ea61452736b",
+      "name": "Sticky Note15"
+    },
+    {
+      "parameters": {
+        "content": "Sends success response to API client\nIncludes booking ID, date & time",
+        "height": 336,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        2320,
+        -112
+      ],
+      "typeVersion": 1,
+      "id": "c420a206-5c0a-4d01-acc3-bb09d7a05dbf",
+      "name": "Sticky Note16"
+    },
+    {
+      "parameters": {
+        "content": "Returned when slot is already booked\nPrevents double booking",
+        "height": 336,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1712,
+        336
+      ],
+      "typeVersion": 1,
+      "id": "e96b8c37-e8e7-4e36-9360-709730302c1c",
+      "name": "Sticky Note17"
+    },
+    {
+      "parameters": {
+        "content": "Generates time slots based on:\\n> - Clinic working hours (09–12, 13–17)\\n> - Appointment duration\\n> - Existing bookings\\n> - 24-hour advance booking rule",
+        "height": 352,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        752,
+        -304
+      ],
+      "typeVersion": 1,
+      "id": "506f87bf-5962-4337-a4c7-ea4fb679b7ac",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.Email }}",
+        "subject": " Smilecare Dental Appointment",
+        "message": "=\nAppointment Confirmed!\n\n\nDear {{ $json.Name }},\n\n\nThis is a confirmation email for your booking at Smile Dental Care.\nBooking Id:{{ $json['Booking ID'] }} \nDate:{{ $json['Appointment Date'] }} \nTime: {{ $json['Appointment Time'] }} \n\n\nWe are located at 📍 123 Dental Street\nSuite 100\nYour City, ST 12345.\n\nSee you soon! ",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2352,
+        16
+      ],
+      "id": "6827014f-a114-432a-a0de-2f1e5c63feac",
+      "name": "Send a message",
+      "webhookId": "376699bd-7078-4873-87cf-f2220689dbbb",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "aEUCCNRJrJg08CxY",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "Return slot is successfully booked.",
+        "height": 336,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        2576,
+        -112
+      ],
+      "typeVersion": 1,
+      "id": "cfd88a55-1875-4b15-a13c-0fe113d54da3",
+      "name": "Sticky Note18"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "API - Get Available Slots": {
+      "main": [
+        [
+          {
+            "node": "Parse Availability Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Availability Request": {
+      "main": [
+        [
+          {
+            "node": "Read Appointments for Availability",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Available Slots": {
+      "main": [
+        [
+          {
+            "node": "Return Available Slots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API - Book Appointment": {
+      "main": [
+        [
+          {
+            "node": "Validate Booking Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Booking Request": {
+      "main": [
+        [
+          {
+            "node": "Generate API Booking ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate API Booking ID": {
+      "main": [
+        [
+          {
+            "node": "Prepare API Booking Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare API Booking Data": {
+      "main": [
+        [
+          {
+            "node": "Combine API Date and Time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine API Date and Time": {
+      "main": [
+        [
+          {
+            "node": "Read Appointments for Booking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check API Conflicts": {
+      "main": [
+        [
+          {
+            "node": "Is API Slot Available?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is API Slot Available?": {
+      "main": [
+        [
+          {
+            "node": "Create API Calendar Event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Slot Unavailable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store API Booking to Appointments": {
+      "main": [
+        [
+          {
+            "node": "Store API Booking to Analytics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store API Booking to Analytics": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Appointments for Availability": {
+      "main": [
+        [
+          {
+            "node": "Calculate Available Slots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Appointments for Booking": {
+      "main": [
+        [
+          {
+            "node": "Check API Conflicts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create API Calendar Event": {
+      "main": [
+        [
+          {
+            "node": "Store API Booking to Appointments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message": {
+      "main": [
+        [
+          {
+            "node": "Return Booking Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "d7d31a81-fd68-4d64-847d-280f2e04f027",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "0b67c106e5e054ffca46dc85b36a3a1aa0d09f4782993bb008c5dede81ddc66a"
+  },
+  "id": "iToVfRkKjt7ANxT4",
+  "tags": []
+}
