@@ -1,0 +1,207 @@
+# 📄 Dental Clinic Appointment System — Documentation
+
+## 1. **Overview**
+
+This is a **Dental Clinic Appointment Management System** built with **n8n.io automation platform**. It allows patients to book appointments and automatically notifies doctors and staff via **calendar events** and other notifications (e.g., email, SMS/WhatsApp) when appointments are created, updated, or canceled.
+
+**Core Capabilities**
+
+* Receive appointment requests (web form, webhook, or messaging).
+* Check doctor availability (Google Calendar / other calendar provider).
+* Create or update calendar events.
+* Notify doctors and patients of appointment details.
+* Send reminders and follow-ups (optional enhancements). ([n8n][2])
+
+---
+
+## 2. **Architecture**
+
+```
+[Patient Request] → [n8n Webhook Trigger] → [Availability Check] → [Calendar Tool]
+                                           ↘ [Notifications (Email/SMS/WhatsApp)]  
+```
+
+### Components
+
+1. **Trigger**
+
+   * A webhook or form submission receives appointment requests.
+   * Inputs: Patient name, email/phone, desired date/time, service type.
+
+2. **n8n Workflow Nodes**
+
+   * Webhook Trigger
+   * Function / Logic nodes (validate input, generate appointment ID)
+   * Calendar Tool (Google Calendar / Microsoft Outlook)
+   * Notification nodes (Email via SMTP/Gmail, SMS/WhatsApp via external API)
+
+3. **Calendar Integration**
+
+   * Checks for availability.
+   * Creates a calendar event on success.
+   * Stores the unique event ID (used for updates/cancellations).
+
+4. **Notification**
+
+   * Sends confirmations to patient and doctor.
+   * Appointment reminders can be added via scheduled triggers.
+
+---
+
+## 3. **Workflow Steps**
+
+### Step 1 — Receive Appointment Request
+
+* Trigger: HTTP Webhook or Form Input.
+* Validate patient information.
+* Example payload:
+
+  ```json
+  {
+    "name": "John Doe",
+    "email": "[email protected]",
+    "phone": "+123456789",
+    "date": "2025-12-20",
+    "time": "14:00",
+    "service": "Dental Checkup"
+  }
+  ```
+
+### Step 2 — Check Availability
+
+* Use **Google Calendar** node to list available slots.
+* If slot is free → proceed.
+* If not free → respond with alternatives.
+
+### Step 3 — Book Appointment
+
+* Create a new event in the calendar:
+
+  * Title: `"Dental Appointment — John Doe"`
+  * Date/Time
+  * Description: includes patient details & appointment ID.
+* Save the returned **event ID** for future updates/cancellations. ([n8n][2])
+
+### Step 4 — Notifications
+
+* **Doctor Notification**
+
+  * Email/SMS with appointment details.
+  * Example:
+
+    ```
+    New Appointment Booked  
+    Patient: John Doe  
+    Time: Dec 20, 2:00 PM  
+    ID: APT-12345
+    ```
+* **Patient Confirmation**
+
+  * Email/SMS with calendar link and details.
+
+---
+
+## 4. **Integrations & Tools**
+
+| Integration                     | Purpose                              |
+| ------------------------------- | ------------------------------------ |
+| **n8n.io**                      | Workflow orchestration               |
+| **Google Calendar API**         | Schedule and manage calendar events  |
+| **SMTP/Gmail**                  | Sending email notifications          |
+| **SMS/WhatsApp API (optional)** | Real-time SMS/WhatsApp confirmations |
+
+---
+
+## 5. **Environment Setup**
+
+### Prerequisites
+
+* n8n Cloud or Self-Hosted instance.
+* Google Calendar API credentials (OAuth).
+* Email SMTP credentials (Gmail/SendGrid/Mailgun).
+* Optional SMS/WhatsApp API credentials (Twilio/Evolution API).
+
+### Configuration
+
+1. **Create Credentials in n8n**
+
+   * Google Calendar OAuth2
+   * SMTP Email Credentials
+   * SMS API (optional)
+
+2. **Workflow Import**
+
+   * From n8n dashboard: **Workflows → Import → Upload Workflow JSON**
+
+3. **Variables & Secrets**
+
+   * Clinic email(s)
+   * Default doctor calendar ID
+   * Notification templates
+
+---
+
+## 6. **Notifications Templates**
+
+### Doctor Email
+
+```
+Subject: New Appointment: {{ $json["patient"] }}
+Body:
+New appointment scheduled.
+
+Patient: {{ $json["patient"] }}
+Email: {{ $json["email"] }}
+Phone: {{ $json["phone"] }}
+Date: {{ $json["date"] }}
+Time: {{ $json["time"] }}
+Appointment ID: {{ $json["appointmentId"] }}
+```
+
+### Patient Email
+
+```
+Subject: Appointment Confirmed – {{ $json["date"] }}
+Body:
+Hello {{ $json["patient"] }},
+Your appointment is confirmed for {{ $json["date"] }} at {{ $json["time"] }}.
+Doctor: Dr. {{ $json["doctor"] }}
+Appointment ID: {{ $json["appointmentId"] }}
+Calendar Link: <Link to calendar event>
+```
+
+---
+
+## 7. **Scheduling Reminders (Optional)**
+
+Add a **Schedule Trigger** in n8n:
+
+* Daily run at specific time → look ahead for next-day appointments.
+* Send reminder to patients/doctors.
+
+---
+
+## 8. **Error Handling**
+
+* If the calendar API fails → send admin alert.
+* If notifications fail → retry or log for manual follow-up.
+
+---
+
+## 9. **Security & Compliance**
+
+* Secure webhook endpoints (e.g., API key validation).
+* Protect patient data (GDPR/HIPAA as required).
+* Store sensitive credentials securely in n8n credentials.
+
+---
+
+## 10. **Future Enhancements**
+
+🔹 Rescheduling and cancellation flows
+🔹 SMS/WhatsApp reminders with automated follow-ups
+🔹 Integration with clinic CRM or patient portal
+🔹 Voice/Chat booking via Telegram/WhatsApp chatbot ([n8n][3])
+
+---
+
